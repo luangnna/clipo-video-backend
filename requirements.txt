@@ -1,8 +1,9 @@
 fastapi
 uvicorn
-requests
-openai-whisper
 yt-dlp
-pydantic
+openai
+python-dotenv
+requests
+whisper
 torch
-
+ffmpeg-python
