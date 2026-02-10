@@ -1,28 +1,27 @@
 FROM python:3.11-slim
 
-# Dependências de sistema
+# Instalar FFmpeg + dependências
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
     curl \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# yt-dlp
-RUN pip install --no-cache-dir yt-dlp
-
+# Diretório de trabalho
 WORKDIR /app
 
-# Dependências Python
+# Copiar dependências
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
 
-# Código
+# Instalar libs Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar código
 COPY . .
 
-ENV PYTHONUNBUFFERED=1
-
+# Expor porta
 EXPOSE 8000
 
-CMD ["python", "main.py"]
+# Start do servidor
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
