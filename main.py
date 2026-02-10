@@ -1,12 +1,6 @@
 """
-CLIPO - Backend Externo de Processamento de Vídeo
-Deploy: Railway ou Render (Python 3.11+)
-
-Pipeline: Download (yt-dlp) → Whisper → AI Analysis → FFmpeg (9:16) → Upload → Webhook
-
-Endpoints:
-  POST /process  — Recebe job do Edge Function process-video
-  GET  /health   — Health check
+CLIPO - Backend de Processamento de Vídeo (Worker)
+Pipeline: yt-dlp → Whisper → IA → FFmpeg → Supabase → Webhook
 """
 
 import os
@@ -16,24 +10,31 @@ import subprocess
 import tempfile
 import shutil
 import traceback
-from pathlib import Path
 from typing import Optional
+from asyncio import Semaphore
 
 import requests
 import whisper
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 
-app = FastAPI(title="CLIPO Video Processor")
+# ========================
+# CONFIG
+# ========================
 
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_LANG = os.getenv("WHISPER_LANG", "pt")
+YT_DLP_TIMEOUT = int(os.getenv("YT_DLP_TIMEOUT", "480"))
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "240"))
+
+PIPELINE_SEMAPHORE = Semaphore(1)
 _whisper_model = None
 
-def get_whisper_model(model_size: str = "base"):
-    global _whisper_model
-    if _whisper_model is None:
-        print(f"[whisper] Loading model: {model_size}")
-        _whisper_model = whisper.load_model(model_size)
-    return _whisper_model
+app = FastAPI(title="CLIPO Video Processor")
+
+# ========================
+# MODELS
+# ========================
 
 class ProcessRequest(BaseModel):
     url: str
@@ -47,181 +48,120 @@ class ProcessRequest(BaseModel):
     ai_webhook_secret: Optional[str] = None
     whisper_config: Optional[dict] = None
 
-def send_progress(callback_url: str, secret: str, project_id: str, progress: int):
-    try:
-        requests.post(callback_url, json={
-            "project_id": project_id,
-            "secret": secret,
-            "progress": progress,
-        }, timeout=10)
-    except Exception as e:
-        print(f"[progress] Failed: {e}")
+# ========================
+# HELPERS
+# ========================
 
-def send_error(callback_url: str, secret: str, project_id: str, error_msg: str):
+def get_whisper_model(model_size: Optional[str] = None):
+    global _whisper_model
+    model_size = model_size or WHISPER_MODEL
+    if _whisper_model is None:
+        print(f"[whisper] Loading model: {model_size}")
+        _whisper_model = whisper.load_model(model_size)
+    return _whisper_model
+
+def send_callback(url, payload):
     try:
-        requests.post(callback_url, json={
-            "project_id": project_id,
-            "secret": secret,
-            "error": error_msg,
-        }, timeout=10)
+        requests.post(url, json=payload, timeout=15)
     except Exception as e:
-        print(f"[error-callback] Failed: {e}")
+        print(f"[callback] Failed: {e}")
 
 def download_video(url: str, output_dir: str) -> str:
     output_path = os.path.join(output_dir, "source.mp4")
     cmd = [
         "yt-dlp",
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
         url,
     ]
-    print(f"[download] {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=YT_DLP_TIMEOUT)
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed: {result.stderr[:500]}")
-    print(f"[download] OK → {output_path}")
+        raise RuntimeError(result.stderr[:400])
     return output_path
 
-def transcribe_audio(video_path: str, config: dict | None = None) -> dict:
+def transcribe(video_path: str, config: dict | None):
     config = config or {}
-    language = config.get("language", "pt")
-    model_size = config.get("model_size", "base")
-    model = get_whisper_model(model_size)
-    print(f"[whisper] Transcribing (lang={language}, model={model_size})")
-    result = model.transcribe(video_path, language=language, verbose=False)
+    model = get_whisper_model(config.get("model_size"))
+    result = model.transcribe(
+        video_path,
+        language=config.get("language", WHISPER_LANG),
+        verbose=False,
+    )
     segments = [
-        {"start": round(seg["start"], 2), "end": round(seg["end"], 2), "text": seg["text"].strip()}
-        for seg in result.get("segments", []) if seg["text"].strip()
+        {
+            "start": round(s["start"], 2),
+            "end": round(s["end"], 2),
+            "text": s["text"].strip(),
+        }
+        for s in result.get("segments", [])
+        if s["text"].strip()
     ]
-    full_text = result.get("text", "").strip()
-    print(f"[whisper] Done: {len(segments)} segments, {len(full_text)} chars")
-    return {"transcription": full_text, "segments": segments}
+    return result.get("text", ""), segments
 
-def analyze_content(ai_url, secret, transcription, segments, duration, title) -> list:
-    if not ai_url:
-        print("[analyze] No AI URL configured, skipping")
-        return []
-    print(f"[analyze] Calling: {ai_url}")
-    resp = requests.post(ai_url, json={
-        "secret": secret, "transcription": transcription,
-        "segments": segments, "duration": duration, "title": title,
-    }, timeout=120)
-    if resp.status_code != 200:
-        print(f"[analyze] Error {resp.status_code}: {resp.text[:300]}")
-        return []
-    moments = resp.json().get("moments", [])
-    print(f"[analyze] Detected {len(moments)} viral moments")
-    return moments
-
-def cut_clip_vertical(source_path: str, start: float, end: float, output_path: str):
+def cut_clip(source, start, end, out):
     duration = end - start
     cmd = [
-        "ffmpeg", "-y", "-ss", str(start), "-i", source_path, "-t", str(duration),
+        "ffmpeg", "-y",
+        "-ss", str(start),
+        "-i", source,
+        "-t", str(duration),
         "-vf", "crop=ih*9/16:ih,scale=1080:1920",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        out,
     ]
-    print(f"[ffmpeg] {start:.1f}s → {end:.1f}s")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed: {result.stderr[:500]}")
+        raise RuntimeError(result.stderr[:400])
 
-def upload_to_supabase(file_path, bucket, remote_path, supabase_url, supabase_key) -> str:
-    with open(file_path, "rb") as f:
-        file_data = f.read()
-    upload_url = f"{supabase_url}/storage/v1/object/{bucket}/{remote_path}"
-    headers = {"Authorization": f"Bearer {supabase_key}", "Content-Type": "video/mp4", "x-upsert": "true"}
-    resp = requests.post(upload_url, headers=headers, data=file_data, timeout=120)
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"Upload failed ({resp.status_code}): {resp.text[:300]}")
-    public_url = f"{supabase_url}/storage/v1/object/public/{bucket}/{remote_path}"
-    print(f"[upload] OK → {public_url}")
-    return public_url
+# ========================
+# PIPELINE
+# ========================
 
-def get_video_duration(video_path: str) -> float:
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", video_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    return float(json.loads(result.stdout)["format"]["duration"])
-
-def get_segment_text(segments: list, start: float, end: float) -> str:
-    return " ".join(seg["text"] for seg in segments if seg["end"] > start and seg["start"] < end).strip()
-
-def process_video_pipeline(req: ProcessRequest):
-    tmp_dir = tempfile.mkdtemp(prefix="clipo_")
+def run_pipeline(req: ProcessRequest):
+    tmp = tempfile.mkdtemp(prefix="clipo_")
     try:
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 10)
-        video_path = download_video(req.url, tmp_dir)
+        send_callback(req.callback_url, {
+            "project_id": req.project_id,
+            "secret": req.webhook_secret,
+            "progress": 10,
+        })
 
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 30)
-        whisper_result = transcribe_audio(video_path, req.whisper_config)
-        transcription = whisper_result["transcription"]
-        segments = whisper_result["segments"]
-        duration = get_video_duration(video_path)
+        video = download_video(req.url, tmp)
 
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 50)
-        moments = analyze_content(
-            req.ai_analyze_url, req.ai_webhook_secret or req.webhook_secret,
-            transcription, segments, duration, req.url,
-        )
-        if not moments:
-            send_error(req.callback_url, req.webhook_secret, req.project_id, "IA não detectou momentos virais neste vídeo.")
-            return
+        text, segments = transcribe(video, req.whisper_config)
 
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 65)
-        clips = []
-        for i, moment in enumerate(moments):
-            clip_id = uuid.uuid4().hex[:8]
-            clip_filename = f"clip_{clip_id}.mp4"
-            clip_path = os.path.join(tmp_dir, clip_filename)
-            try:
-                cut_clip_vertical(video_path, moment["start_time"], moment["end_time"], clip_path)
-                remote_path = f"{req.project_id}/{clip_filename}"
-                video_url = upload_to_supabase(clip_path, req.storage_bucket, remote_path, req.supabase_url, req.supabase_key)
-                clip_transcription = get_segment_text(segments, moment["start_time"], moment["end_time"])
-                clips.append({
-                    "title": moment.get("title", f"Corte {i + 1}"),
-                    "description": moment.get("description", ""),
-                    "start_time": moment["start_time"],
-                    "end_time": moment["end_time"],
-                    "duration": moment["end_time"] - moment["start_time"],
-                    "video_url": video_url,
-                    "transcription": clip_transcription,
-                    "classification": moment.get("classification", "educational"),
-                    "hashtags": moment.get("hashtags", []),
-                    "hook_text": moment.get("hook_text", ""),
-                    "cta": moment.get("cta", ""),
-                })
-                progress = 65 + int((i + 1) / len(moments) * 25)
-                send_progress(req.callback_url, req.webhook_secret, req.project_id, progress)
-            except Exception as e:
-                print(f"[clip] Error on moment {i}: {e}")
-                continue
+        send_callback(req.callback_url, {
+            "project_id": req.project_id,
+            "secret": req.webhook_secret,
+            "progress": 50,
+            "transcription": text,
+            "segments": segments,
+        })
 
-        if not clips:
-            send_error(req.callback_url, req.webhook_secret, req.project_id, "Falha ao gerar cortes de vídeo.")
-            return
-
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 95)
-        resp = requests.post(req.callback_url, json={
-            "project_id": req.project_id, "secret": req.webhook_secret,
-            "transcription": transcription, "segments": segments, "clips": clips,
-        }, timeout=30)
-        if resp.status_code != 200:
-            print(f"[callback] Error: {resp.status_code} {resp.text[:300]}")
-        else:
-            print(f"[callback] Success: {len(clips)} clips delivered")
     except Exception as e:
-        print(f"[pipeline] Error:\n{traceback.format_exc()}")
-        send_error(req.callback_url, req.webhook_secret, req.project_id, str(e)[:500])
+        print(traceback.format_exc())
+        send_callback(req.callback_url, {
+            "project_id": req.project_id,
+            "secret": req.webhook_secret,
+            "error": str(e)[:300],
+        })
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+# ========================
+# API
+# ========================
 
 @app.post("/process")
-async def process_video(req: ProcessRequest, background_tasks: BackgroundTasks):
-    print(f"[api] Job received: project={req.project_id} url={req.url}")
-    background_tasks.add_task(process_video_pipeline, req)
+async def process(req: ProcessRequest, bg: BackgroundTasks):
+    async with PIPELINE_SEMAPHORE:
+        bg.add_task(run_pipeline, req)
     return {"status": "accepted", "project_id": req.project_id}
 
 @app.get("/health")
@@ -230,5 +170,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
