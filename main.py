@@ -94,23 +94,14 @@ def send_error(callback_url: str, secret: str, project_id: str, error_msg: str):
 # ---------------------------------------------------------------------------
 # Cookies helper — decode YT_COOKIES env var for yt-dlp
 # ---------------------------------------------------------------------------
-
 def setup_cookies(output_dir: str) -> str | None:
-    """Decode cookies from base64 env var and write to temp file."""
     cookies_b64 = os.environ.get("YT_COOKIES")
     if not cookies_b64:
         return None
-    try:
-        cookies_path = os.path.join(output_dir, "cookies.txt")
-        with open(cookies_path, "w") as f:
-            f.write(base64.b64decode(cookies_b64).decode("utf-8"))
-        print(f"[cookies] Written to {cookies_path}")
-        return cookies_path
-    except Exception as e:
-        print(f"[cookies] Failed to decode: {e}")
-        return None
-
-
+    cookies_path = os.path.join(output_dir, "cookies.txt")
+    with open(cookies_path, "w") as f:
+        f.write(base64.b64decode(cookies_b64).decode("utf-8"))
+    return cookies_path
 # ---------------------------------------------------------------------------
 # Step 1 — Download video with yt-dlp
 # ---------------------------------------------------------------------------
