@@ -31,6 +31,10 @@ from pydantic import BaseModel
 
 app = FastAPI(title="CLIPO Video Processor")
 
+@app.get("/")
+def root():
+    return {"status": "Clipo backend online 🚀"}
+
 # ---------------------------------------------------------------------------
 # Whisper (lazy singleton)
 # ---------------------------------------------------------------------------
