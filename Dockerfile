@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install ffmpeg and Node.js (required by yt-dlp)
+# Install ffmpeg and yt-dlp dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip "setuptools<70" wheel
 RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
 COPY main.py .
@@ -23,3 +23,4 @@ COPY main.py .
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
