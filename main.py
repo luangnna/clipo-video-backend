@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import shutil
 import traceback
+import base64
 from pathlib import Path
 from typing import Optional
 
@@ -91,19 +92,47 @@ def send_error(callback_url: str, secret: str, project_id: str, error_msg: str):
 
 
 # ---------------------------------------------------------------------------
+# Cookies helper — decode YT_COOKIES env var for yt-dlp
+# ---------------------------------------------------------------------------
+
+def setup_cookies(output_dir: str) -> str | None:
+    """Decode cookies from base64 env var and write to temp file."""
+    cookies_b64 = os.environ.get("YT_COOKIES")
+    if not cookies_b64:
+        return None
+    try:
+        cookies_path = os.path.join(output_dir, "cookies.txt")
+        with open(cookies_path, "w") as f:
+            f.write(base64.b64decode(cookies_b64).decode("utf-8"))
+        print(f"[cookies] Written to {cookies_path}")
+        return cookies_path
+    except Exception as e:
+        print(f"[cookies] Failed to decode: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — Download video with yt-dlp
 # ---------------------------------------------------------------------------
 
 def download_video(url: str, output_dir: str) -> str:
     output_path = os.path.join(output_dir, "source.mp4")
+    cookies_path = setup_cookies(output_dir)
+
     cmd = [
         "yt-dlp",
         "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
-        url,
+        "--extractor-args", "youtube:player_client=mediaconnect",
     ]
+
+    if cookies_path:
+        cmd.extend(["--cookies", cookies_path])
+
+    cmd.append(url)
+
     print(f"[download] {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
@@ -403,4 +432,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
