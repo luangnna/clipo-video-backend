@@ -98,7 +98,6 @@ def download_video(url: str, output_dir: str) -> str:
     output_path = os.path.join(output_dir, "source.mp4")
     cmd = [
         "yt-dlp",
-        "--js-runtimes", "nodejs",
         "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
@@ -404,3 +403,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+    
