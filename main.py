@@ -287,12 +287,17 @@ def get_segment_text(segments: list, start: float, end: float) -> str:
 # ---------------------------------------------------------------------------
 
 def process_video_pipeline(req: ProcessRequest):
+    print("🚀 PIPELINE INICIADO")
     tmp_dir = tempfile.mkdtemp(prefix="clipo_")
-
     try:
+      
+      print("⬇️ Baixando vídeo...")
+      
         # 1. Download
         send_progress(req.callback_url, req.webhook_secret, req.project_id, 10)
         video_path = download_video(req.url, tmp_dir)
+
+      print("🧠 Transcrevendo áudio...")
 
         # 2. Transcribe
         send_progress(req.callback_url, req.webhook_secret, req.project_id, 30)
@@ -302,6 +307,8 @@ def process_video_pipeline(req: ProcessRequest):
 
         # Get video duration
         duration = get_video_duration(video_path)
+
+      print("🤖 Analisando conteúdo...")
 
         # 3. AI analysis (calls ai-analyze-content Edge Function)
         send_progress(req.callback_url, req.webhook_secret, req.project_id, 50)
@@ -407,11 +414,14 @@ def process_video_pipeline(req: ProcessRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/process")
-async def process_video(req: ProcessRequest, background_tasks: BackgroundTasks):
-    """Receive job from process-video Edge Function and start background pipeline."""
-    print(f"[api] Job received: project={req.project_id} url={req.url}")
-    background_tasks.add_task(process_video_pipeline, req)
-    return {"status": "accepted", "project_id": req.project_id}
+def process_video(data: ProcessRequest):
+    print("🔥 ROTA /process FOI CHAMADA")
+
+    run_pipeline(data.project, data.url)
+
+    print("✅ Função terminou")
+
+    return {"status": "ok"}
 
 
 @app.get("/health")
