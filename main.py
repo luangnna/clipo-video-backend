@@ -368,11 +368,11 @@ def process_video_pipeline(req: ProcessRequest):
 def process_video(data: ProcessRequest):
     print("🔥 ROTA /process FOI CHAMADA")
 
-    run_pipeline(data.project, data.url)
+    resultado = process_video_pipeline(data)
 
     print("✅ Função terminou")
 
-    return {"status": "ok"}
+    return resultado
 
 
 @app.get("/health")
