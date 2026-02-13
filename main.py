@@ -288,126 +288,77 @@ def get_segment_text(segments: list, start: float, end: float) -> str:
 
 def process_video_pipeline(req: ProcessRequest):
     print("🚀 PIPELINE INICIADO")
+
     tmp_dir = tempfile.mkdtemp(prefix="clipo_")
+
     try:
-      
-      print("⬇️ Baixando vídeo...")
-      
-        # 1. Download
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 10)
-        video_path = download_video(req.url, tmp_dir)
-
-      print("🧠 Transcrevendo áudio...")
-
-        # 2. Transcribe
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 30)
-        whisper_result = transcribe_audio(video_path, req.whisper_config)
-        transcription = whisper_result["transcription"]
-        segments = whisper_result["segments"]
-
-        # Get video duration
-        duration = get_video_duration(video_path)
-
-      print("🤖 Analisando conteúdo...")
-
-        # 3. AI analysis (calls ai-analyze-content Edge Function)
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 50)
-        moments = analyze_content(
-            ai_url=req.ai_analyze_url,
-            secret=req.ai_webhook_secret or req.webhook_secret,
-            transcription=transcription,
-            segments=segments,
-            duration=duration,
-            title=req.url,
+        # 1️⃣ Download do vídeo
+        print("⬇️ Baixando vídeo...")
+        send_progress(
+            req.callback_url,
+            req.webhook_secret,
+            req.project_id,
+            10
         )
 
-        if not moments:
-            send_error(req.callback_url, req.webhook_secret, req.project_id,
-                       "IA não detectou momentos virais neste vídeo.")
-            return
+        video_path = download_video(req.url, tmp_dir)
 
-        # 4. Cut clips + Upload to Supabase Storage
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 65)
-        clips: list[dict] = []
 
-        for i, moment in enumerate(moments):
-            clip_id = uuid.uuid4().hex[:8]
-            clip_filename = f"clip_{clip_id}.mp4"
-            clip_path = os.path.join(tmp_dir, clip_filename)
+        # 2️⃣ Transcrição com Whisper
+        print("🧠 Transcrevendo áudio...")
+        send_progress(
+            req.callback_url,
+            req.webhook_secret,
+            req.project_id,
+            30
+        )
 
-            try:
-                cut_clip_vertical(
-                    video_path,
-                    moment["start_time"],
-                    moment["end_time"],
-                    clip_path,
-                )
+        whisper_result = transcribe_audio(
+            video_path,
+            req.whisper_config
+        )
 
-                remote_path = f"{req.project_id}/{clip_filename}"
-                video_url = upload_to_supabase(
-                    clip_path,
-                    req.storage_bucket,
-                    remote_path,
-                    req.supabase_url,
-                    req.supabase_key,
-                )
 
-                clip_transcription = get_segment_text(
-                    segments,
-                    moment["start_time"],
-                    moment["end_time"],
-                )
+        # 3️⃣ Criar cortes
+        print("✂️ Gerando cortes...")
+        send_progress(
+            req.callback_url,
+            req.webhook_secret,
+            req.project_id,
+            60
+        )
 
-                # Build clip object matching video-webhook expected schema
-                clips.append({
-                    "title": moment.get("title", f"Corte {i + 1}"),
-                    "description": moment.get("description", ""),
-                    "start_time": moment["start_time"],
-                    "end_time": moment["end_time"],
-                    "duration": moment["end_time"] - moment["start_time"],
-                    "video_url": video_url,
-                    "transcription": clip_transcription,
-                    "classification": moment.get("classification", "educational"),
-                    "hashtags": moment.get("hashtags", []),
-                    "hook_text": moment.get("hook_text", ""),
-                    "cta": moment.get("cta", ""),
-                })
+        clips = generate_clips(
+            video_path,
+            whisper_result,
+            req.edit_config
+        )
 
-                progress = 65 + int((i + 1) / len(moments) * 25)
-                send_progress(req.callback_url, req.webhook_secret, req.project_id, progress)
 
-            except Exception as e:
-                print(f"[clip] Error on moment {i}: {e}")
-                continue
+        # 4️⃣ Finalizado
+        print("✅ Pipeline finalizado")
+        send_progress(
+            req.callback_url,
+            req.webhook_secret,
+            req.project_id,
+            100
+        )
 
-        if not clips:
-            send_error(req.callback_url, req.webhook_secret, req.project_id,
-                       "Falha ao gerar cortes de vídeo.")
-            return
-
-        # 5. Send final results to video-webhook Edge Function
-        send_progress(req.callback_url, req.webhook_secret, req.project_id, 95)
-
-        resp = requests.post(req.callback_url, json={
-            "project_id": req.project_id,
-            "secret": req.webhook_secret,
-            "transcription": transcription,
-            "segments": segments,
-            "clips": clips,
-        }, timeout=30)
-
-        if resp.status_code != 200:
-            print(f"[callback] Error: {resp.status_code} {resp.text[:300]}")
-        else:
-            print(f"[callback] Success: {len(clips)} clips delivered")
+        return {
+            "status": "success",
+            "clips": clips
+        }
 
     except Exception as e:
-        print(f"[pipeline] Error:\n{traceback.format_exc()}")
-        send_error(req.callback_url, req.webhook_secret, req.project_id, str(e)[:500])
+        print("❌ ERRO NO PIPELINE:", str(e))
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
 
 # ---------------------------------------------------------------------------
 # API endpoints
