@@ -148,7 +148,12 @@ def transcribe_audio(video_path: str, config: dict | None = None) -> dict:
     model = get_whisper_model(model_size)
     print(f"[whisper] Transcribing (lang={language}, model={model_size})")
 
-    result = model.transcribe(video_path, language=language, verbose=False)
+    result = model.transcribe(
+        video_path,
+        language=language,
+        verbose=False,
+        fp16=False  # 🔥 ESSENCIAL no Render (CPU)
+    )
 
     segments = [
         {
@@ -162,6 +167,7 @@ def transcribe_audio(video_path: str, config: dict | None = None) -> dict:
 
     full_text = result.get("text", "").strip()
     print(f"[whisper] Done: {len(segments)} segments, {len(full_text)} chars")
+
     return {"transcription": full_text, "segments": segments}
 
 
